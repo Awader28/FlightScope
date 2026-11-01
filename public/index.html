@@ -117,7 +117,7 @@ const pend=new Map();
 function queueAnnounce(e){if(e.type==='trajectory'||e.route||e.simulated||!e.callsign)return announce(e);pend.set(e.id,{e,t:setTimeout(()=>{pend.delete(e.id);announce(e)},3000)})} // replayed history is shown, never spoken
 function setConn(){const c=$('#conn'),t=$('#ct');let k='bad',m='offline';
  if(running){const ok=es&&es.readyState===1,p=snap&&snap.status;
-  if(!ok){k='warn';m='reconnecting…'}else if(!p||p.state==='starting'){k='warn';m='connecting to provider'}else if(p.state==='ok'){k='live';m='live'}else{k='warn';m=(p.state==='rate_limited'?'provider rate-limited':'provider error')+' — '+(p.msg||'')}}
+  if(!ok){k='warn';m='reconnecting…'}else if(!p||p.state==='starting'){k='warn';m='connecting to provider'}else if(p.state==='ok'){k='live';m='live'}else{k='warn';const phase=p.phase==='aircraft_states'?'aircraft states':p.phase;m=(p.state==='rate_limited'?'provider rate-limited':'provider error')+(phase?' ('+phase+')':'')+' — '+(p.msg||'')}}
  c.className='pill '+k;t.textContent=m}
 function onSnap(s){snap=s;lastSnapAt=Date.now();const st=s.stats;
  $('#s_over').textContent=st.overhead;$('#s_hr').textContent=st.hour;$('#s_dep').textContent=st.dep;$('#s_arr').textContent=st.arr;$('#s_trk').textContent=st.tracked;

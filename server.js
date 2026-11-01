@@ -3,8 +3,9 @@
 // Env: PORT, OPENSKY_CLIENT_ID, OPENSKY_CLIENT_SECRET (optional OAuth2), POLL_SECONDS (can only slow polling down)
 const http = require('http'), fs = require('fs'), path = require('path');
 const PORT = +process.env.PORT || 3000, CID = process.env.OPENSKY_CLIENT_ID, CSEC = process.env.OPENSKY_CLIENT_SECRET;
+const AUTH = Boolean(CID && CSEC);
 // Provider-compliant polling: never faster than the daily credit budget allows (anon ≈400/day, registered ≈4000/day — verify in OpenSky docs).
-const MIN_MS = Math.max((+process.env.POLL_SECONDS || 0) * 1000, Math.ceil(86400000 / (CID ? 4000 : 400) * 1.1));
+const MIN_MS = Math.max((+process.env.POLL_SECONDS || 0) * 1000, Math.ceil(86400000 / (AUTH ? 4000 : 400) * 1.1));
 const MAX_R = +process.env.MAX_RADIUS_KM || 500; // max radius (km)
 const D = Math.PI / 180;
 // OpenSky bills by bbox area (as I recall: <25 sq° =1 credit, <100 =2, <400 =3, larger =4 — verify in docs); poll slower as area grows
@@ -32,22 +33,27 @@ const CD = { overhead: 600e3, airspace_entry: 600e3, takeoff: 1800e3, landing: 1
 
 let tok = { v: null, exp: 0 };
 async function token() {
-  if (!CID) return null;
+  if (!CID && !CSEC) return null;
+  if (!AUTH) { const e = new Error('Both OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET are required for authenticated requests'); e.phase = 'authentication'; e.code = 'ERR_OPENSKY_CREDENTIALS'; throw e; }
   if (tok.v && Date.now() < tok.exp) return tok.v;
-  const r = await fetch('https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'client_credentials', client_id: CID, client_secret: CSEC }) });
-  if (!r.ok) throw new Error('OpenSky auth ' + r.status);
-  const j = await r.json(); tok = { v: j.access_token, exp: Date.now() + (j.expires_in - 30) * 1000 }; return tok.v;
+  try {
+    const r = await fetch('https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'client_credentials', client_id: CID, client_secret: CSEC }), signal: AbortSignal.timeout(15000) });
+    if (!r.ok) { const e = new Error('OpenSky auth ' + r.status); e.status = r.status; throw e; }
+    const j = await r.json(); tok = { v: j.access_token, exp: Date.now() + (j.expires_in - 30) * 1000 }; return tok.v;
+  } catch (e) { e.phase = 'authentication'; throw e; }
 }
 async function fetchStates(w) {
   const box = w.r * 1.5, dLa = box / 111, dLo = box / (111 * Math.cos(w.lat * D));
   const u = `https://opensky-network.org/api/states/all?lamin=${Math.max(-90, w.lat - dLa)}&lamax=${Math.min(90, w.lat + dLa)}&lomin=${w.lon - dLo}&lomax=${w.lon + dLo}`;
   const t = await token();
-  const r = await fetch(u, { headers: t ? { authorization: 'Bearer ' + t } : {}, signal: AbortSignal.timeout(15000) });
-  if (r.status === 429) { const e = new Error('OpenSky rate limit reached'); e.rate = 1; e.retry = +r.headers.get('x-rate-limit-retry-after-seconds') || 600; throw e; }
-  if (!r.ok) throw new Error('OpenSky HTTP ' + r.status);
-  w.rem = r.headers.get('x-rate-limit-remaining');
-  const j = await r.json();
-  return (j.states || []).map(s => ({ id: s[0], call: (s[1] || '').trim() || null, t: s[3] || s[4], lon: s[5], lat: s[6], alt: s[7] ?? s[13], gnd: !!s[8], spd: s[9], hdg: s[10], vr: s[11] })).filter(a => a.lat != null && a.lon != null);
+  try {
+    const r = await fetch(u, { headers: t ? { authorization: 'Bearer ' + t } : {}, signal: AbortSignal.timeout(15000) });
+    if (r.status === 429) { const e = new Error('OpenSky rate limit reached'); e.rate = 1; e.retry = +r.headers.get('x-rate-limit-retry-after-seconds') || 600; throw e; }
+    if (!r.ok) { const e = new Error('OpenSky HTTP ' + r.status); e.status = r.status; throw e; }
+    w.rem = r.headers.get('x-rate-limit-remaining');
+    const j = await r.json();
+    return (j.states || []).map(s => ({ id: s[0], call: (s[1] || '').trim() || null, t: s[3] || s[4], lon: s[5], lat: s[6], alt: s[7] ?? s[13], gnd: !!s[8], spd: s[9], hdg: s[10], vr: s[11] })).filter(a => a.lat != null && a.lon != null);
+  } catch (e) { e.phase = 'aircraft_states'; throw e; }
 }
 // SIMULATED provider (clearly flagged everywhere): synthetic aircraft crossing the radius
 function simStates(w) {
@@ -76,6 +82,15 @@ function routeFor(cs) {
 }
 
 const watches = new Map();
+function logProviderError(e) {
+  const cause = e.cause;
+  console.error('OpenSky provider failure', JSON.stringify({
+    phase: e.phase || 'unknown', message: e.message, name: e.name, code: e.code || cause?.code || null,
+    status: e.status || null,
+    cause: cause ? { name: cause.name, code: cause.code, message: cause.message, syscall: cause.syscall, hostname: cause.hostname, address: cause.address, port: cause.port, stack: cause.stack } : null,
+    stack: e.stack
+  }));
+}
 class Watch {
   constructor(k, lat, lon, r, sim) { Object.assign(this, { k, lat, lon, r, sim, clients: new Set(), ac: new Map(), ev: [], seq: 0, epoch: Date.now().toString(36), seen: new Map(), status: { state: 'starting' }, pollMs: sim ? 3000 : MIN_MS * credits(lat, r), rem: null, dead: false }); this.poll(); }
   send(res, name, data, id) { res.write((id ? `id: ${id}\n` : '') + `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`); }
@@ -83,7 +98,7 @@ class Watch {
   async poll() {
     let wait = this.pollMs;
     try { const s = this.sim ? simStates(this) : await fetchStates(this); this.now = Date.now(); this.process(s); this.status = { state: 'ok', at: this.now, provider: this.sim ? 'SIMULATED' : 'OpenSky', credits: this.rem }; }
-    catch (e) { this.status = { state: e.rate ? 'rate_limited' : 'error', msg: e.message, at: Date.now() }; if (e.retry) wait = Math.max(wait, e.retry * 1000); }
+    catch (e) { logProviderError(e); this.status = { state: e.rate ? 'rate_limited' : 'error', phase: e.phase || 'unknown', msg: e.message, at: Date.now() }; if (e.retry) wait = Math.max(wait, e.retry * 1000); }
     this.bc('snapshot', this.snap());
     if (!this.dead) this.timer = setTimeout(() => this.poll(), wait);
   }
@@ -180,4 +195,4 @@ http.createServer((q, s) => {
     }
   }
   fs.readFile(path.join(__dirname, 'public', 'index.html'), (e, d) => { if (e) { s.writeHead(404); return s.end('not found'); } s.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); s.end(d); });
-}).listen(PORT, () => console.log(`FlightScope Event Engine on :${PORT} — OpenSky ${CID ? 'authenticated' : 'anonymous'}, min poll ${MIN_MS / 1000}s`));
+}).listen(PORT, () => console.log(`FlightScope Event Engine on :${PORT} — OpenSky ${AUTH ? 'authenticated' : 'anonymous'}, min poll ${MIN_MS / 1000}s`));
