@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#05090f">
+<title>FlightScope — Event Engine</title>
+<style>
+:root{--bg:#05090f;--p:#0a131d;--ln:#14324a;--tx:#cfe6f5;--dim:#6b8aa0;--cy:#29e0ff;--am:#ffb020;--gr:#3dff9a;--rd:#ff5470;--mg:#d46bff;color-scheme:dark}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:radial-gradient(circle at 30% 0,#0b1d2e,var(--bg) 60%);color:var(--tx);font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;display:grid;grid-template-rows:46px 28px 1fr}
+header{display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid var(--ln)}
+h1{font-size:14px;letter-spacing:.2em;margin:0;color:var(--cy);text-shadow:0 0 12px var(--cy)}h1 span{color:var(--dim)}
+.sp{flex:1}.pill{padding:2px 9px;border:1px solid var(--ln);border-radius:99px;font-size:11px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--dim)}
+.live .dot{background:var(--gr);box-shadow:0 0 8px var(--gr)}.warn .dot{background:var(--am);box-shadow:0 0 8px var(--am)}.bad .dot{background:var(--rd);box-shadow:0 0 8px var(--rd)}
+.ticker{overflow:hidden;white-space:nowrap;border-bottom:1px solid var(--ln);background:#07111a;color:var(--am);line-height:28px}
+.ticker span{display:inline-block;padding-left:100%;animation:tk 40s linear infinite}@keyframes tk{to{transform:translateX(-100%)}}
+main{display:grid;grid-template-columns:1fr 410px;gap:10px;padding:10px;min-height:0}
+.col{display:flex;flex-direction:column;gap:10px;min-height:0}
+.card{background:var(--p);border:1px solid var(--ln);border-radius:8px;padding:10px}
+.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.st b{display:block;font-size:22px;color:var(--cy);text-shadow:0 0 10px #29e0ff66}.st small{color:var(--dim);font-size:10px;text-transform:uppercase}
+.radar{flex:1;position:relative;min-height:260px;padding:0;overflow:hidden}canvas{width:100%;height:100%;display:block}
+.banner{position:absolute;top:8px;left:8px;right:8px;display:none;padding:6px 10px;border-radius:6px;background:#2a0f3a;border:1px solid var(--mg);color:var(--mg)}
+button,input,select{font:inherit;color:var(--tx);background:#0d1e2e;border:1px solid var(--ln);border-radius:5px;padding:5px 9px}
+button{cursor:pointer}button:hover{border-color:var(--cy)}button.on{border-color:var(--cy);color:var(--cy)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:5px 0}label{color:var(--dim)}input[type=number]{width:70px}
+.tabs{display:flex;gap:6px}.list{flex:1;overflow:auto;min-height:150px}
+.it{padding:7px 4px;border-bottom:1px solid #0f2233}.it .h{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.it time{color:var(--dim);margin-left:auto}
+.t{font-weight:bold}.overhead .t,.airspace_entry .t{color:var(--cy)}.takeoff .t{color:var(--gr)}.landing .t{color:var(--am)}.trajectory .t{color:var(--mg)}
+.b{font-size:10px;padding:0 6px;border-radius:4px;border:1px solid}.b.i{color:var(--am)}.b.s{color:var(--mg)}.b.o{color:var(--cy)}
+.note{color:var(--dim);font-size:11px}.n{background:var(--rd);color:#fff;border-radius:9px;padding:0 6px;font-size:10px}
+@media(max-width:900px){html,body{height:auto}body{grid-template-rows:auto 28px auto}header{flex-wrap:wrap;padding:8px 12px;gap:6px}main{grid-template-columns:1fr;padding:8px}.stats{grid-template-columns:repeat(3,1fr)}.radar{height:min(92vw,420px);min-height:0;flex:none}.list{flex:none;max-height:60vh}input,button,select{font-size:16px;min-height:40px}input[type=range]{min-height:0}}
+@media(max-width:480px){.stats .st b{font-size:18px}h1{font-size:12px}.card{padding:8px}}
+</style></head><body>
+<header><h1>FLIGHTSCOPE <span>// EVENT ENGINE</span></h1><span class="sp"></span>
+<span class="pill" id="mode"></span><span class="pill" id="conn"><i class="dot"></i><span id="ct">offline</span></span></header>
+<div class="ticker"><span id="tk">No events yet — press Start to request your location and begin monitoring.</span></div>
+<main>
+<div class="col">
+ <div class="stats card">
+  <div class="st"><b id="s_over">–</b><small>Overhead</small></div><div class="st"><b id="s_hr">–</b><small>Detections / 1h</small></div>
+  <div class="st"><b id="s_dep">–</b><small>Departures*</small></div><div class="st"><b id="s_arr">–</b><small>Arrivals*</small></div>
+  <div class="st"><b id="s_trk">–</b><small>Tracked</small></div><div class="st"><b id="s_age">–</b><small>Data age</small></div>
+ </div>
+ <div class="card radar"><canvas id="cv"></canvas><div class="banner" id="sim">SIMULATED DATA — aircraft and events below are synthetic, not real flights.</div></div>
+ <div class="note">* Departures/arrivals are <b>inferred</b> from position, altitude, speed, ground flag and airport proximity. No airline-confirmed departure/arrival feed is connected. <span id="prov"></span></div>
+</div>
+<div class="col">
+ <div class="card">
+  <div class="row"><button id="start" class="on">▶ Start (use my location)</button><button id="stop">■ Stop</button></div>
+  <div class="row" id="man" style="display:none"><label>Lat</label><input id="lat" type="number" step="any"><label>Lon</label><input id="lon" type="number" step="any"><button id="go">Go</button></div>
+  <div class="note" id="geo"></div>
+  <div class="row"><label>Radius km</label><input id="rad" type="number" min="1" max="500" value="10">
+   <button id="sm" title="Synthetic aircraft for testing the UI/TTS">Simulated data</button></div>
+  <div class="row"><label>Airport</label><input id="ai" placeholder="ICAO" size="5" maxlength="4"><input id="an" placeholder="Name" size="10"><button id="aa">Add</button></div>
+  <div class="row"><input id="alat" type="number" step="any" placeholder="lat (optional)" style="width:100px"><input id="alon" type="number" step="any" placeholder="lon (optional)" style="width:100px"><input id="ael" type="number" placeholder="elev m" style="width:80px"></div>
+  <div class="note" id="am">Leave lat/lon blank to look them up by ICAO code.</div><div class="note" id="al"></div>
+  <div class="row"><button id="tts">🔊 Voice</button><label>Vol</label><input id="vol" type="range" min="0" max="1" step="0.1">
+   <label title="Pause between queued announcements">Gap s</label><input id="cd" type="number" min="0" max="300"></div>
+  <div class="row"><label>Voice</label><select id="vs" style="max-width:100%"></select></div>
+  <div class="row"><label>Pitch (lower = deeper)</label><input id="pt" type="range" min="0.5" max="1.5" step="0.1"></div>
+  <div class="row"><button id="quiet">🌙 Quiet mode</button><button id="nt">🔔 Browser notifications</button><button id="test">Test voice</button></div>
+ </div>
+ <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0">
+  <div class="tabs"><button id="t1" class="on">Live feed</button><button id="t2">Notification centre <span class="n" id="nn" style="display:none">0</span></button></div>
+  <div class="list" id="feed"></div><div class="list" id="notes" style="display:none"></div>
+ </div>
+</div></main>
+<script>
+const $=s=>document.querySelector(s),esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const S=Object.assign({tts:true,vol:1,cd:2,voice:'',pitch:0.8,quiet:false,nt:false,radius:10,sim:false,lat:null,lon:null},JSON.parse(localStorage.fs_cfg||'{}'));
+const save=()=>localStorage.fs_cfg=JSON.stringify(S);
+let es,snap,lastSnapAt=0,lastSpeak=0,backoff=1000,unread=0,running=false,retryT;const ids=new Set(),tick=[];
+const LBL={overhead:'OVERHEAD',airspace_entry:'AIRSPACE ENTRY',takeoff:'INFERRED TAKEOFF',landing:'INFERRED LANDING',trajectory:'TRAJECTORY CHANGE'};
+const ft=m=>m==null?null:Math.round(m*3.28084/100)*100,kt=m=>m==null?null:Math.round(m*1.94384),dg=h=>h==null?null:Math.round(h)%360;
+const cmp=b=>['north','north-east','east','south-east','south','south-west','west','north-west'][Math.round(b/45)%8];
+const cs=e=>e.callsign||'unidentified, hex '+e.icao24;
+function facts(e){return[e.dist!=null?e.dist.toFixed(1)+' km '+cmp(e.brg):null,ft(e.alt)!=null?ft(e.alt).toLocaleString()+' ft':null,kt(e.spd)!=null?kt(e.spd)+' kt':null,dg(e.hdg)!=null?'hdg '+String(dg(e.hdg)).padStart(3,'0')+'°':null].map(x=>x||null)}
+const line=e=>`${e.simulated?'[SIM] ':''}${LBL[e.type]} ${e.callsign||e.icao24}${e.airport?' @'+e.airport:''} · ${facts(e).map(x=>x||'n/a').join(' · ')}${e.route?' · route '+(e.route.origin.icao||'?')+'→'+(e.route.destination.icao||'?')+' (unconfirmed)':''}`;
+function speech(e){const sp=s=>s.replace(/([A-Z]+)(\d+)/,'$1 $2'),r=e.route,
+ nm=a=>{const c=a.city||'',n=(a.name||'').replace(/\s+(International\s+)?Airport$/i,'').trim();return c&&n.toLowerCase().startsWith(c.toLowerCase())&&n.split(' ').length<=2?n:(c||n||a.icao||a.iata)},
+ f=[e.dist!=null?`${e.dist.toFixed(1)} kilometres ${cmp(e.brg)}`:null,ft(e.alt)!=null?`altitude ${ft(e.alt)} feet`:null,kt(e.spd)!=null?`speed ${kt(e.spd)} knots`:null,dg(e.hdg)!=null?`heading ${dg(e.hdg)} degrees`:null].filter(Boolean).join(', ');
+ const pre=(e.simulated?'Simulated. ':'')+({overhead:'Aircraft overhead',airspace_entry:'Aircraft entering airspace',takeoff:'Possible takeoff, inferred, not airline confirmed'+(e.airport?' near '+e.airport:''),landing:'Possible landing, inferred, not airline confirmed'+(e.airport?' near '+e.airport:'')})[e.type];
+ const iata=r&&r.flight&&/^[A-Z]{2}\d+[A-Z]?$/.test(r.flight)?r.flight.replace(/^([A-Z])([A-Z])(\d+.*)$/,'$1 $2 $3'):null; // e.g. "Q F 1"
+ return `${pre}. ${iata||sp(cs(e))}${r?` from ${nm(r.origin)} to ${nm(r.destination)}`:''}. ${f}.`}
+function addNote(e,status){const d=document.createElement('div');d.className='it';d.innerHTML=`<div class="h"><span class="t">${esc(LBL[e.type])}</span><span class="b ${status==='spoken'||status==='notified'?'o':'i'}">${esc(status)}</span><time>${new Date().toLocaleTimeString()}</time></div>${esc(line(e))}`;$('#notes').prepend(d);if($('#t2').className!=='on'){unread++;$('#nn').textContent=unread;$('#nn').style.display='inline'}}
+// Speech queue: every announcement is read, one at a time. S.cd = pause (s) between announcements.
+// Voices: browsers don't expose gender, so "Auto" picks an English voice whose name is a known male one; you can choose any installed voice.
+const MALE=/\b(male|daniel|alex|fred|david|mark|guy|george|james|arthur|oliver|ryan|thomas|rishi|ravi|aaron|gordon|lee|reed|rocko|diego|jorge|paul|bruce|ralph|evan|nathan|liam|brian|davis|eric|roger|steffan|tony|christopher|andrew)\b/i,FEM=/\b(female|samantha|victoria|karen|zira|susan|hazel|heera|moira|tessa|fiona|ava|allison|kate|serena|siri|aria|jenny|sonia|libby|emma|veena|catherine|linda)\b/i;
+let voices=[];
+function loadVoices(){if(!('speechSynthesis' in window))return;voices=speechSynthesis.getVoices();const en=voices.filter(v=>/^en/i.test(v.lang)),l=en.length?en:voices;
+ $('#vs').innerHTML='<option value="">Auto (deeper, male-sounding)</option>'+l.map(v=>`<option value="${esc(v.voiceURI)}">${esc(v.name)} (${esc(v.lang)})</option>`).join('');$('#vs').value=S.voice||''}
+function pickVoice(){if(S.voice)return voices.find(v=>v.voiceURI===S.voice)||null;return voices.filter(v=>/^en/i.test(v.lang)).find(v=>MALE.test(v.name)&&!FEM.test(v.name))||null}
+function vox(u){const v=pickVoice();if(v){u.voice=v;u.lang=v.lang}u.pitch=S.pitch;u.volume=S.vol;return u}
+let vq=[],speaking=false;
+function announce(e){if(e.type==='trajectory')return;
+ if(S.quiet){addNote(e,'muted: quiet mode');return}
+ if(S.nt&&Notification.permission==='granted'){new Notification(LBL[e.type]+' '+(e.callsign||e.icao24),{body:line(e),tag:e.id});addNote(e,'notified')}
+ if(!S.tts||!('speechSynthesis' in window)){addNote(e,'voice off');return}
+ vq.push({e,t:Date.now()});if(vq.length>15)addNote(vq.shift().e,'dropped: voice queue full');pump()}
+function pump(){if(speaking||!vq.length)return;
+ if(S.quiet||!S.tts){vq.length=0;return}
+ const it=vq.shift();
+ if(Date.now()-it.t>90000){addNote(it.e,'skipped: waited >90 s in voice queue');return pump()}
+ speaking=true;let wd;const done=()=>{if(!speaking)return;speaking=false;clearTimeout(wd);setTimeout(pump,S.cd*1000)};
+ const u=new SpeechSynthesisUtterance(speech(it.e));vox(u);u.onend=done;u.onerror=done;wd=setTimeout(done,30000); // watchdog: some browsers never fire onend
+ addNote(it.e,'spoken'+(vq.length?` · ${vq.length} more queued`:''));speechSynthesis.speak(u)}
+function paintRoute(d,r){const n=d.querySelector('.rt');if(!n)return;const f=a=>esc((a.icao||a.iata||'?')+(a.city||a.name?' '+(a.city||a.name):''));
+ n.innerHTML=r?`ROUTE ${f(r.origin)} → ${f(r.destination)} <span class="b i" title="Route for this callsign from ${esc(r.source)}; not verified for this specific flight">UNCONFIRMED · callsign database</span>`:'Route: not found in callsign database'}
+function onEvent(e){if(ids.has(e.id))return;ids.add(e.id);
+ const d=document.createElement('div');d.className='it '+e.type;
+ const b=e.simulated?'<span class="b s">SIMULATED</span>':e.inferred?`<span class="b i" title="${esc(e.basis||'')}">INFERRED · ${esc(e.conf||'')} confidence</span>`:'<span class="b o">OBSERVED ADS-B</span>';
+ d.innerHTML=`<div class="h"><span class="t">${LBL[e.type]}</span>${b}<time>${new Date(e.t).toLocaleTimeString()}</time></div><b>${esc(e.callsign||e.icao24)}</b>${e.airport?' near '+esc(e.airport):''} · ${facts(e).map(x=>esc(x||'n/a')).join(' · ')}<div class="note rt"></div><div class="note">${esc(e.basis||'')}${e.inferred?' — not confirmed by airline data':''}</div>`;d.dataset.id=e.id;if(e.route)paintRoute(d,e.route);else if(!e.simulated&&e.callsign)d.querySelector('.rt').textContent='Route: looking up…';
+ $('#feed').prepend(d);while($('#feed').children.length>150)$('#feed').lastChild.remove();
+ tick.unshift(line(e));tick.length=Math.min(tick.length,6);$('#tk').textContent=tick.join('   ◆   ');
+ if(Date.now()-e.t<20000)queueAnnounce(e)}
+// Real flights wait up to 3 s for the route lookup so the announcement can include it; otherwise announce without it
+const pend=new Map();
+function queueAnnounce(e){if(e.type==='trajectory'||e.route||e.simulated||!e.callsign)return announce(e);pend.set(e.id,{e,t:setTimeout(()=>{pend.delete(e.id);announce(e)},3000)})} // replayed history is shown, never spoken
+function setConn(){const c=$('#conn'),t=$('#ct');let k='bad',m='offline';
+ if(running){const ok=es&&es.readyState===1,p=snap&&snap.status;
+  if(!ok){k='warn';m='reconnecting…'}else if(!p||p.state==='starting'){k='warn';m='connecting to provider'}else if(p.state==='ok'){k='live';m='live'}else{k='warn';m=(p.state==='rate_limited'?'provider rate-limited':'provider error')+' — '+(p.msg||'')}}
+ c.className='pill '+k;t.textContent=m}
+function onSnap(s){snap=s;lastSnapAt=Date.now();const st=s.stats;
+ $('#s_over').textContent=st.overhead;$('#s_hr').textContent=st.hour;$('#s_dep').textContent=st.dep;$('#s_arr').textContent=st.arr;$('#s_trk').textContent=st.tracked;
+ $('#sim').style.display=s.sim?'block':'none';$('#mode').textContent=s.sim?'SIMULATED':'LIVE · '+(s.status.provider||'OpenSky');$('#mode').style.color=s.sim?'var(--mg)':'var(--cy)';
+ $('#prov').textContent=`Poll every ${Math.round(s.pollMs/1000)}s`+(s.status.credits?` · API credits left: ${s.status.credits}`:'')+(s.status.state!=='ok'&&s.status.msg?' · '+s.status.msg:'');
+ setConn();draw()}
+let wl;async function lock(){try{if('wakeLock' in navigator&&!wl&&running){wl=await navigator.wakeLock.request('screen');wl.onrelease=()=>wl=null}}catch{}} // keep phone screen on so voice keeps running
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)lock()});
+function connect(){clearTimeout(retryT);if(es)es.close();if(S.lat==null)return;running=true;snap=null;lock();
+ es=new EventSource(`/api/stream?lat=${S.lat}&lon=${S.lon}&radius=${S.radius}&sim=${S.sim?1:0}`);
+ es.addEventListener('snapshot',e=>{backoff=1000;onSnap(JSON.parse(e.data))});es.addEventListener('event',e=>onEvent(JSON.parse(e.data)));es.addEventListener('route',e=>{const j=JSON.parse(e.data),d=[...$('#feed').children].find(x=>x.dataset.id===j.id);if(d)paintRoute(d,j.route);const q=pend.get(j.id);if(q){clearTimeout(q.t);pend.delete(j.id);if(j.route)q.e.route=j.route;announce(q.e)}});
+ es.onopen=setConn;es.onerror=()=>{setConn();if(es.readyState===2&&running){retryT=setTimeout(connect,backoff);backoff=Math.min(backoff*2,30000)}}}
+function stop(){running=false;if(es)es.close();if(wl){wl.release();wl=null}setConn()}
+function start(){speechSynthesis.getVoices();speechSynthesis.speak(new SpeechSynthesisUtterance('')); // unlock TTS on user gesture
+ if(!navigator.geolocation){$('#man').style.display='flex';$('#geo').textContent='Geolocation unavailable — enter coordinates.';return}
+ $('#geo').textContent='Requesting location permission…';
+ navigator.geolocation.getCurrentPosition(p=>{S.lat=+p.coords.latitude.toFixed(4);S.lon=+p.coords.longitude.toFixed(4);save();$('#geo').textContent=`Location ${S.lat}, ${S.lon} (±${Math.round(p.coords.accuracy)} m)`;connect()},
+  er=>{$('#man').style.display='flex';$('#geo').textContent='Location not available ('+er.message+'). Enter coordinates manually.'},{timeout:15000,maximumAge:60000})}
+// radar
+const cv=$('#cv');function draw(){const ctx=cv.getContext('2d'),dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;if(cv.width!==Math.round(w*dpr)){cv.width=w*dpr;cv.height=h*dpr}
+ ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);const cx=w/2,cy=h/2,r=snap?snap.r:S.radius,sc=(Math.min(w,h)/2-26)/(r*1.5);
+ ctx.lineWidth=1;ctx.font='10px monospace';ctx.textAlign='center';
+ [[.33,0],[.66,0],[1,1],[1.5,2]].forEach(([f,k])=>{ctx.beginPath();ctx.arc(cx,cy,r*f*sc,0,7);ctx.strokeStyle=k===1?'#29e0ff88':'#14324a';ctx.setLineDash(k===2?[4,6]:[]);ctx.stroke();ctx.setLineDash([]);if(f<=1){ctx.fillStyle='#6b8aa0';ctx.fillText((r*f).toFixed(1)+' km',cx,cy-r*f*sc-3)}});
+ ctx.strokeStyle='#14324a';ctx.beginPath();ctx.moveTo(cx,cy-r*1.5*sc);ctx.lineTo(cx,cy+r*1.5*sc);ctx.moveTo(cx-r*1.5*sc,cy);ctx.lineTo(cx+r*1.5*sc,cy);ctx.stroke();ctx.fillStyle='#29e0ff';ctx.fillText('N',cx,cy-r*1.5*sc-6);
+ ctx.beginPath();ctx.arc(cx,cy,4,0,7);ctx.fillStyle='#3dff9a';ctx.shadowColor='#3dff9a';ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
+ if(!snap){ctx.fillStyle='#6b8aa0';ctx.fillText('Waiting for data…',cx,cy+30);return}
+ const P=(la,lo)=>[cx+(lo-snap.center[1])*111.32*Math.cos(snap.center[0]*Math.PI/180)*sc,cy-(la-snap.center[0])*110.57*sc];
+ snap.airports.forEach(a=>{const[x,y]=P(a.lat,a.lon);ctx.strokeStyle='#ffb020';ctx.strokeRect(x-4,y-4,8,8);ctx.fillStyle='#ffb020';ctx.fillText(a.icao,x,y-8)});
+ snap.ac.forEach(a=>{const col=snap.sim?'#d46bff':a.gnd?'#6b8aa0':a.in?'#29e0ff':'#3b6f94';
+  ctx.beginPath();a.trail.forEach(([la,lo],i)=>{const[x,y]=P(la,lo);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.strokeStyle=col+'66';ctx.stroke();
+  const[x,y]=P(a.lat,a.lon);ctx.save();ctx.translate(x,y);ctx.shadowColor=col;ctx.shadowBlur=a.in?16:6;ctx.fillStyle=col;ctx.beginPath();
+  if(a.hdg==null)ctx.arc(0,0,4,0,7);else{ctx.rotate(a.hdg*Math.PI/180);ctx.moveTo(0,-7);ctx.lineTo(5,6);ctx.lineTo(0,3);ctx.lineTo(-5,6)}ctx.closePath();ctx.fill();ctx.restore();
+  ctx.fillStyle=col;ctx.textAlign='left';ctx.fillText((a.call||a.id)+(ft(a.alt)!=null?' FL'+String(Math.round(ft(a.alt)/100)).padStart(3,'0'):''),x+9,y+3);ctx.textAlign='center'})}
+addEventListener('resize',draw);
+// controls
+const tg=(id,k)=>{$(id).classList.toggle('on',!!S[k])};
+function sync(){tg('#tts','tts');tg('#quiet','quiet');tg('#nt','nt');tg('#sm','sim');$('#vol').value=S.vol;$('#pt').value=S.pitch;$('#cd').value=S.cd;$('#rad').value=S.radius}
+$('#start').onclick=start;$('#stop').onclick=stop;
+$('#go').onclick=()=>{S.lat=+$('#lat').value;S.lon=+$('#lon').value;if(isFinite(S.lat)&&isFinite(S.lon)&&$('#lat').value){save();connect()}};
+$('#tts').onclick=()=>{S.tts=!S.tts;if(!S.tts){vq.length=0;speechSynthesis.cancel()}save();sync()};
+$('#quiet').onclick=()=>{S.quiet=!S.quiet;if(S.quiet){vq.length=0;speechSynthesis.cancel()}save();sync()};
+$('#vs').onchange=e=>{S.voice=e.target.value;save();$('#test').click()};$('#pt').oninput=e=>{S.pitch=+e.target.value;save()};
+if('speechSynthesis' in window){speechSynthesis.onvoiceschanged=loadVoices;loadVoices()}
+$('#vol').oninput=e=>{S.vol=+e.target.value;save()};$('#cd').onchange=e=>{S.cd=Math.max(0,+e.target.value||0);save()};
+$('#rad').onchange=e=>{S.radius=Math.min(500,Math.max(1,+e.target.value||10));save();sync();if(running)connect()};
+$('#sm').onclick=()=>{S.sim=!S.sim;save();sync();if(running)connect()};
+$('#nt').onclick=async()=>{if(!('Notification' in window)){alert('Notifications not supported in this browser');return}
+ if(S.nt){S.nt=false}else{const p=Notification.permission==='granted'?'granted':await Notification.requestPermission();S.nt=p==='granted';if(!S.nt)alert('Notification permission was not granted.')}save();sync()};
+$('#test').onclick=()=>{const u=vox(new SpeechSynthesisUtterance('Voice test. Simulated announcement, not a real flight.'));speechSynthesis.speak(u)};
+$('#t1').onclick=()=>{$('#t1').className='on';$('#t2').className='';$('#feed').style.display='';$('#notes').style.display='none'};
+$('#t2').onclick=()=>{$('#t2').className='on';$('#t1').className='';$('#feed').style.display='none';$('#notes').style.display='';unread=0;$('#nn').style.display='none'};
+setInterval(()=>{$('#s_age').textContent=lastSnapAt&&running?Math.round((Date.now()-lastSnapAt)/1000)+'s':'–'},1000);
+async function adm(url,o){o.headers=Object.assign({},o.headers,localStorage.fs_admin?{authorization:'Bearer '+localStorage.fs_admin}:{});let r=await fetch(url,o);if(r.status===403){const t=prompt('Admin token required to change airports');if(t){localStorage.fs_admin=t;o.headers.authorization='Bearer '+t;r=await fetch(url,o)}}return r}
+async function apList(){try{const a=await(await fetch('/api/airports')).json();$('#al').innerHTML=a.map(p=>`${esc(p.icao)} ${esc(p.name)} (${(+p.lat).toFixed(3)}, ${(+p.lon).toFixed(3)}, ${Math.round(p.elev)} m) <a href="#" data-i="${esc(p.icao)}" style="color:var(--rd)">remove</a>`).join('<br>')}catch{}}
+$('#aa').onclick=async()=>{const b={icao:$('#ai').value,name:$('#an').value,lat:$('#alat').value,lon:$('#alon').value,elev:$('#ael').value};$('#am').textContent='Adding…';
+ try{const r=await adm('/api/airports',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}),j=await r.json();if(!r.ok){$('#am').textContent=j.error;return}
+ $('#am').textContent='Added '+b.icao.toUpperCase()+' — check the coordinates below.';['#ai','#an','#alat','#alon','#ael'].forEach(i=>$(i).value='');apList()}catch(e){$('#am').textContent='Failed: '+e.message}};
+$('#al').onclick=async e=>{const i=e.target.dataset&&e.target.dataset.i;if(!i)return;e.preventDefault();await adm('/api/airports?icao='+encodeURIComponent(i),{method:'DELETE'});apList()};
+apList();
+sync();draw();if(S.lat!=null){$('#geo').textContent=`Saved location ${S.lat}, ${S.lon}. Press Start to re-request, or Go.`;$('#lat').value=S.lat;$('#lon').value=S.lon;$('#man').style.display='flex'}
+</script></body></html>
