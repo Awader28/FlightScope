@@ -6,6 +6,8 @@ const PORT = +process.env.PORT || 3000, CID = process.env.OPENSKY_CLIENT_ID, CSE
 const AUTH = Boolean(CID && CSEC);
 // Provider-compliant polling: never faster than the daily credit budget allows (anon ≈400/day, registered ≈4000/day — verify in OpenSky docs).
 const MIN_MS = Math.max((+process.env.POLL_SECONDS || 0) * 1000, Math.ceil(86400000 / (AUTH ? 4000 : 400) * 1.1));
+const ADMIN = process.env.ADMIN_TOKEN, MAX_WATCHES = +process.env.MAX_WATCHES || 20; // public-deploy safety
+const isAdmin = q => ADMIN ? q.headers.authorization === 'Bearer ' + ADMIN : /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(q.socket.remoteAddress); // no token set => localhost only
 const MAX_R = +process.env.MAX_RADIUS_KM || 500; // max radius (km)
 const D = Math.PI / 180;
 // OpenSky bills by bbox area (as I recall: <25 sq° =1 credit, <100 =2, <400 =3, larger =4 — verify in docs); poll slower as area grows
@@ -55,6 +57,36 @@ async function fetchStates(w) {
     return (j.states || []).map(s => ({ id: s[0], call: (s[1] || '').trim() || null, t: s[3] || s[4], lon: s[5], lat: s[6], alt: s[7] ?? s[13], gnd: !!s[8], spd: s[9], hdg: s[10], vr: s[11] })).filter(a => a.lat != null && a.lon != null);
   } catch (e) { e.phase = 'aircraft_states'; throw e; }
 }
+// ADS-B community providers (readsb v2 format, no API credits; radius max 250 nm): adsb.lol, airplanes.live. Verify each provider's terms of use before public deployment.
+const FAST_MS = Math.max((+process.env.POLL_SECONDS || 0) * 1000, 5000);
+async function fetchAdsb(w, which) {
+  const base = which === 'airplaneslive' ? 'https://api.airplanes.live/v2' : 'https://api.adsb.lol/v2', nm = Math.min(250, Math.ceil(w.r * 1.5 / 1.852));
+  try {
+    const r = await fetch(`${base}/point/${w.lat}/${w.lon}/${nm}`, { signal: AbortSignal.timeout(15000) });
+    if (r.status === 429) { const e = new Error('ADS-B API rate limit'); e.rate = 1; e.retry = 30; throw e; }
+    if (!r.ok) { const e = new Error('ADS-B API HTTP ' + r.status); e.status = r.status; throw e; }
+    const j = await r.json(), now = j.now > 1e11 ? j.now / 1000 : (j.now || Date.now() / 1000), num = v => typeof v === 'number' ? v : null;
+    return (j.ac || []).map(a => ({ id: a.hex, call: (a.flight || '').trim() || null, t: now - (a.seen_pos ?? a.seen ?? 0), lat: a.lat, lon: a.lon,
+      alt: a.alt_baro === 'ground' ? 0 : num(a.alt_baro) != null ? a.alt_baro * 0.3048 : num(a.alt_geom) != null ? a.alt_geom * 0.3048 : null, gnd: a.alt_baro === 'ground',
+      spd: num(a.gs) != null ? a.gs * 0.514444 : null, hdg: num(a.track), vr: num(a.baro_rate) != null ? a.baro_rate * 0.00508 : num(a.geom_rate) != null ? a.geom_rate * 0.00508 : null }))
+      .filter(a => a.id && typeof a.lat === 'number' && typeof a.lon === 'number');
+  } catch (e) { e.phase = 'aircraft_states'; throw e; }
+}
+// PROVIDER=auto (default): OpenSky first; if it is unreachable (network failure / 5xx) use adsb.lol for 15 min, then retry OpenSky. Or force: opensky | adsblol | airplaneslive
+let openskyDownUntil = 0;
+async function getStates(w) {
+  const want = (process.env.PROVIDER || 'auto').toLowerCase();
+  if (want === 'opensky' || (want === 'auto' && Date.now() > openskyDownUntil)) {
+    try { return { s: await fetchStates(w), prov: 'OpenSky' }; }
+    catch (e) {
+      if (want === 'opensky' || e.rate || (e.status && e.status < 500)) throw e; // real HTTP answers (auth, rate limit) are not outages
+      openskyDownUntil = Date.now() + 15 * 60e3; logProviderError(e); console.error('OpenSky unreachable — using adsb.lol for 15 min');
+    }
+  }
+  const which = want === 'airplaneslive' ? 'airplaneslive' : 'adsblol';
+  return { s: await fetchAdsb(w, which), prov: which === 'airplaneslive' ? 'airplanes.live' : 'adsb.lol' };
+}
+
 // SIMULATED provider (clearly flagged everywhere): synthetic aircraft crossing the radius
 function simStates(w) {
   const now = Date.now(), dt = (now - (w.simT || now)) / 1000; w.simT = now; w.simA = w.simA || [];
@@ -72,13 +104,29 @@ function routeFor(cs) {
     try {
       const res = await fetch('https://api.adsbdb.com/v0/callsign/' + encodeURIComponent(cs), { signal: AbortSignal.timeout(8000) });
       let r = null;
-      if (res.ok) { const fr = (await res.json()).response?.flightroute; const m = a => ({ icao: a.icao_code, iata: a.iata_code, name: a.name, city: a.municipality }); if (fr?.origin && fr?.destination) r = { origin: m(fr.origin), destination: m(fr.destination), flight: fr.callsign_iata || null, source: 'adsbdb.com callsign database' }; }
+      if (res.ok) { const fr = (await res.json()).response?.flightroute; const m = a => ({ icao: a.icao_code, iata: a.iata_code, name: a.name, city: a.municipality }); if (fr?.origin && fr?.destination) r = { origin: m(fr.origin), destination: m(fr.destination), flight: fr.callsign_iata || null, airline: fr.airline?.name || null, source: 'adsbdb.com callsign database' }; }
       console.log('route', cs, res.status, r ? r.origin.icao + '->' + r.destination.icao : 'none');
       if (res.ok || res.status === 404) routeCache.set(cs, { t: Date.now(), r }); // don't cache transient failures
       return r;
     } catch (err) { console.log('route', cs, 'failed:', err.message); return null; } finally { inflight.delete(cs); }
   })();
   inflight.set(cs, p); return p;
+}
+
+// Airline name from the 3-letter ICAO prefix of the callsign (ABY123 -> Air Arabia). Built-in table first, then adsbdb.com for unknown prefixes.
+const AIRLINES = { ABY: 'Air Arabia', QFA: 'Qantas', AIC: 'Air India', IGO: 'IndiGo', AXB: 'Air India Express', SEJ: 'SpiceJet', AKJ: 'Akasa Air', VTI: 'Vistara', UAE: 'Emirates', ETD: 'Etihad Airways', QTR: 'Qatar Airways', FDB: 'flydubai', GFA: 'Gulf Air', OMA: 'Oman Air', SVA: 'Saudia', KAC: 'Kuwait Airways', SIA: 'Singapore Airlines', CPA: 'Cathay Pacific', BAW: 'British Airways', VIR: 'Virgin Atlantic', DLH: 'Lufthansa', AFR: 'Air France', KLM: 'KLM', THY: 'Turkish Airlines', RYR: 'Ryanair', EZY: 'easyJet', UAL: 'United', DAL: 'Delta', AAL: 'American Airlines', ACA: 'Air Canada', ANA: 'All Nippon Airways', JAL: 'Japan Airlines', THA: 'Thai Airways', MAS: 'Malaysia Airlines', AIQ: 'Thai AirAsia', AXM: 'AirAsia', SQC: 'Singapore Airlines Cargo' };
+const airlineCache = new Map();
+const prefixOf = cs => (/^([A-Z]{3})\d/.exec(cs || '') || [])[1] || null;
+async function airlineFor(pf) {
+  const c = airlineCache.get(pf); if (c && Date.now() - c.t < 24 * 3600e3) return c.n;
+  try {
+    const res = await fetch('https://api.adsbdb.com/v0/airline/' + pf, { signal: AbortSignal.timeout(8000) });
+    let n = null;
+    if (res.ok) { const j = (await res.json()).response, a = Array.isArray(j) ? j[0] : j; n = a?.name || null; }
+    console.log('airline', pf, res.status, n || 'none');
+    if (res.ok || res.status === 404) airlineCache.set(pf, { t: Date.now(), n });
+    return n;
+  } catch (err) { console.log('airline', pf, 'failed:', err.message); return null; }
 }
 
 const watches = new Map();
@@ -96,9 +144,18 @@ class Watch {
   send(res, name, data, id) { res.write((id ? `id: ${id}\n` : '') + `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`); }
   bc(name, data, id) { for (const c of this.clients) this.send(c, name, data, id); }
   async poll() {
-    let wait = this.pollMs;
-    try { const s = this.sim ? simStates(this) : await fetchStates(this); this.now = Date.now(); this.process(s); this.status = { state: 'ok', at: this.now, provider: this.sim ? 'SIMULATED' : 'OpenSky', credits: this.rem }; }
-    catch (e) { logProviderError(e); this.status = { state: e.rate ? 'rate_limited' : 'error', phase: e.phase || 'unknown', msg: e.message, at: Date.now() }; if (e.retry) wait = Math.max(wait, e.retry * 1000); }
+    const live = Math.max(1, [...watches.values()].filter(w => !w.sim).length); // provider budget is shared by all live watches
+    let wait = 3000;
+    try {
+      let s, prov = 'SIMULATED';
+      if (this.sim) s = simStates(this);
+      else { const g = await getStates(this); s = g.s; prov = g.prov; wait = prov === 'OpenSky' ? this.pollMs * live : Math.max(FAST_MS, 1100 * live); }
+      this.effMs = wait; this.now = Date.now(); this.process(s);
+      this.status = { state: 'ok', at: this.now, provider: prov, credits: prov === 'OpenSky' ? this.rem : null };
+    } catch (e) {
+      logProviderError(e); wait = e.retry ? e.retry * 1000 : 30000; this.effMs = wait;
+      this.status = { state: e.rate ? 'rate_limited' : 'error', phase: e.phase || 'unknown', msg: e.message, at: Date.now() };
+    }
     this.bc('snapshot', this.snap());
     if (!this.dead) this.timer = setTimeout(() => this.poll(), wait);
   }
@@ -110,7 +167,7 @@ class Watch {
       const p = this.ac.get(a.id); this.detect(p, a);
       a.seenAt = now; a.trail = ((p && p.trail) || []).concat([[a.lat, a.lon]]).slice(-20); this.ac.set(a.id, a);
     }
-    for (const [id, p] of this.ac) if (!ids.has(id) && now - p.seenAt > Math.max(120e3, 3 * this.pollMs)) {
+    for (const [id, p] of this.ac) if (!ids.has(id) && now - p.seenAt > Math.max(120e3, 3 * (this.effMs || this.pollMs))) {
       const ap = nearAp(p);
       if (!p.gnd && ap && p.alt != null && p.alt - ap.elev < 400 && (p.vr || 0) < -1) this.emit('landing', p, { airport: ap.icao, conf: 'low', basis: 'last seen descending below 400 m near airport, then signal lost' });
       this.ac.delete(id);
@@ -137,24 +194,27 @@ class Watch {
     const key = type + a.id; if (this.now - (this.seen.get(key) || 0) < CD[type]) return; this.seen.set(key, this.now);
     const seq = ++this.seq, ev = { id: `${this.epoch}-${seq}`, seq, type, t: this.now, icao24: a.id, callsign: a.call, dist: a.d, brg: a.brg, alt: a.alt, spd: a.spd, hdg: a.hdg, vr: a.vr, inferred: type === 'takeoff' || type === 'landing', confirmed: false, simulated: this.sim, ...x };
     const cr = !this.sim && a.call && routeCache.get(a.call); if (cr && cr.r) ev.route = cr.r;
+    const pf = this.sim ? null : prefixOf(a.call); ev.airline = (ev.route && ev.route.airline) || (pf && (AIRLINES[pf] || (airlineCache.get(pf) || {}).n)) || null;
     this.ev.push(ev); if (this.ev.length > 300) this.ev.shift(); this.bc('event', ev, ev.id);
-    if (!ev.route && !this.sim && a.call) routeFor(a.call).then(r => { ev.route = r; this.bc('route', { id: ev.id, route: r }); }); // late update, shown in feed
+    if (!this.sim && a.call && (!ev.route || !ev.airline)) Promise.all([routeFor(a.call), pf && !ev.airline ? airlineFor(pf) : null]).then(([r, al]) => { ev.route = r; ev.airline = (r && r.airline) || al || ev.airline; this.bc('route', { id: ev.id, route: r, airline: ev.airline }); }); // late update, shown in feed
   }
   snap() {
     const h = Date.now() - 3600e3, e = this.ev.filter(x => x.t > h), c = t => e.filter(x => x.type === t).length;
     const ac = [...this.ac.values()].map(a => ({ id: a.id, call: a.call, lat: a.lat, lon: a.lon, alt: a.alt, spd: a.spd, hdg: a.hdg, gnd: a.gnd, d: a.d, in: a.in, trail: a.trail }));
-    return { center: [this.lat, this.lon], r: this.r, sim: this.sim, status: this.status, pollMs: this.pollMs, ac, airports: AIRPORTS.filter(p => hav(this.lat, this.lon, p.lat, p.lon) < this.r * 3), stats: { overhead: ac.filter(a => a.in).length, tracked: ac.length, hour: e.length, dep: c('takeoff'), arr: c('landing') } };
+    return { center: [this.lat, this.lon], r: this.r, sim: this.sim, status: this.status, pollMs: this.effMs || this.pollMs, ac, airports: AIRPORTS.filter(p => hav(this.lat, this.lon, p.lat, p.lon) < this.r * 3), stats: { overhead: ac.filter(a => a.in).length, tracked: ac.length, hour: e.length, dep: c('takeoff'), arr: c('landing') } };
   }
 }
 
 http.createServer((q, s) => {
   const u = new URL(q.url, 'http://x');
+  if (u.pathname === '/healthz') { s.writeHead(200); return s.end('ok'); }
   if (u.pathname === '/api/stream') {
     const lat = +u.searchParams.get('lat'), lon = +u.searchParams.get('lon'), sim = u.searchParams.get('sim') === '1';
     const r = Math.min(MAX_R, Math.max(1, +u.searchParams.get('radius') || 10));
     if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) { s.writeHead(400); return s.end('bad lat/lon'); }
     const la = +lat.toFixed(3), lo = +lon.toFixed(3), k = [la, lo, r, sim].join();
-    let w = watches.get(k); if (!w) watches.set(k, w = new Watch(k, la, lo, r, sim));
+    let w = watches.get(k);
+    if (!w) { if (watches.size >= MAX_WATCHES) { s.writeHead(503, { 'retry-after': '60' }); return s.end('server busy'); } watches.set(k, w = new Watch(k, la, lo, r, sim)); }
     clearTimeout(w.killT);
     s.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
     s.write('retry: 3000\n\n');
@@ -167,6 +227,7 @@ http.createServer((q, s) => {
   }
   if (u.pathname === '/api/route') { // diagnostic: curl 'localhost:3000/api/route?callsign=QFA1'
     const cs = (u.searchParams.get('callsign') || '').toUpperCase().trim();
+    if (!isAdmin(q)) { s.writeHead(403); return s.end('admin only'); }
     if (!/^[A-Z0-9]{3,8}$/.test(cs)) { s.writeHead(400); return s.end('bad callsign'); }
     routeCache.delete(cs); routeFor(cs).then(r => { s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify(r)); }); return;
   }
@@ -174,6 +235,7 @@ http.createServer((q, s) => {
     const json = (c, o) => { s.writeHead(c, { 'content-type': 'application/json' }); s.end(JSON.stringify(o)); };
     const changed = () => { saveAp(); for (const w of watches.values()) w.bc('snapshot', w.snap()); json(200, AIRPORTS); }; // takes effect immediately
     if (q.method === 'GET') return json(200, AIRPORTS);
+    if (!isAdmin(q)) return json(403, { error: ADMIN ? 'admin token required' : 'set ADMIN_TOKEN to edit airports remotely' });
     if (q.method === 'DELETE') { const i = (u.searchParams.get('icao') || '').toUpperCase(); AIRPORTS = AIRPORTS.filter(p => p.icao !== i); return changed(); }
     if (q.method === 'POST') {
       let b = ''; q.on('data', d => { if ((b += d).length > 5e3) q.destroy(); });

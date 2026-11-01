@@ -74,13 +74,14 @@ const ft=m=>m==null?null:Math.round(m*3.28084/100)*100,kt=m=>m==null?null:Math.r
 const cmp=b=>['north','north-east','east','south-east','south','south-west','west','north-west'][Math.round(b/45)%8];
 const cs=e=>e.callsign||'unidentified, hex '+e.icao24;
 function facts(e){return[e.dist!=null?e.dist.toFixed(1)+' km '+cmp(e.brg):null,ft(e.alt)!=null?ft(e.alt).toLocaleString()+' ft':null,kt(e.spd)!=null?kt(e.spd)+' kt':null,dg(e.hdg)!=null?'hdg '+String(dg(e.hdg)).padStart(3,'0')+'°':null].map(x=>x||null)}
-const line=e=>`${e.simulated?'[SIM] ':''}${LBL[e.type]} ${e.callsign||e.icao24}${e.airport?' @'+e.airport:''} · ${facts(e).map(x=>x||'n/a').join(' · ')}${e.route?' · route '+(e.route.origin.icao||'?')+'→'+(e.route.destination.icao||'?')+' (unconfirmed)':''}`;
+const line=e=>`${e.simulated?'[SIM] ':''}${LBL[e.type]} ${e.airline?e.airline+' ':''}${e.callsign||e.icao24}${e.airport?' @'+e.airport:''} · ${facts(e).map(x=>x||'n/a').join(' · ')}${e.route?' · route '+(e.route.origin.icao||'?')+'→'+(e.route.destination.icao||'?')+' (unconfirmed)':''}`;
 function speech(e){const sp=s=>s.replace(/([A-Z]+)(\d+)/,'$1 $2'),r=e.route,
  nm=a=>{const c=a.city||'',n=(a.name||'').replace(/\s+(International\s+)?Airport$/i,'').trim();return c&&n.toLowerCase().startsWith(c.toLowerCase())&&n.split(' ').length<=2?n:(c||n||a.icao||a.iata)},
  f=[e.dist!=null?`${e.dist.toFixed(1)} kilometres ${cmp(e.brg)}`:null,ft(e.alt)!=null?`altitude ${ft(e.alt)} feet`:null,kt(e.spd)!=null?`speed ${kt(e.spd)} knots`:null,dg(e.hdg)!=null?`heading ${dg(e.hdg)} degrees`:null].filter(Boolean).join(', ');
  const pre=(e.simulated?'Simulated. ':'')+({overhead:'Aircraft overhead',airspace_entry:'Aircraft entering airspace',takeoff:'Possible takeoff, inferred, not airline confirmed'+(e.airport?' near '+e.airport:''),landing:'Possible landing, inferred, not airline confirmed'+(e.airport?' near '+e.airport:'')})[e.type];
  const iata=r&&r.flight&&/^[A-Z]{2}\d+[A-Z]?$/.test(r.flight)?r.flight.replace(/^([A-Z])([A-Z])(\d+.*)$/,'$1 $2 $3'):null; // e.g. "Q F 1"
- return `${pre}. ${iata||sp(cs(e))}${r?` from ${nm(r.origin)} to ${nm(r.destination)}`:''}. ${f}.`}
+ const num=((e.callsign||'').match(/^[A-Z]{3}(\d+[A-Z]{0,2})$/)||[])[1],al=e.airline&&num?e.airline+' '+num.replace(/^0+(?=\d)/,'').replace(/\d/g,'$& ').trim():null; // "Air Arabia 1 2 3"
+ return `${pre}. ${al||iata||sp(cs(e))}${r?` from ${nm(r.origin)} to ${nm(r.destination)}`:''}. ${f}.`}
 function addNote(e,status){const d=document.createElement('div');d.className='it';d.innerHTML=`<div class="h"><span class="t">${esc(LBL[e.type])}</span><span class="b ${status==='spoken'||status==='notified'?'o':'i'}">${esc(status)}</span><time>${new Date().toLocaleTimeString()}</time></div>${esc(line(e))}`;$('#notes').prepend(d);if($('#t2').className!=='on'){unread++;$('#nn').textContent=unread;$('#nn').style.display='inline'}}
 // Speech queue: every announcement is read, one at a time. S.cd = pause (s) between announcements.
 // Voices: browsers don't expose gender, so "Auto" picks an English voice whose name is a known male one; you can choose any installed voice.
@@ -108,7 +109,7 @@ function paintRoute(d,r){const n=d.querySelector('.rt');if(!n)return;const f=a=>
 function onEvent(e){if(ids.has(e.id))return;ids.add(e.id);
  const d=document.createElement('div');d.className='it '+e.type;
  const b=e.simulated?'<span class="b s">SIMULATED</span>':e.inferred?`<span class="b i" title="${esc(e.basis||'')}">INFERRED · ${esc(e.conf||'')} confidence</span>`:'<span class="b o">OBSERVED ADS-B</span>';
- d.innerHTML=`<div class="h"><span class="t">${LBL[e.type]}</span>${b}<time>${new Date(e.t).toLocaleTimeString()}</time></div><b>${esc(e.callsign||e.icao24)}</b>${e.airport?' near '+esc(e.airport):''} · ${facts(e).map(x=>esc(x||'n/a')).join(' · ')}<div class="note rt"></div><div class="note">${esc(e.basis||'')}${e.inferred?' — not confirmed by airline data':''}</div>`;d.dataset.id=e.id;if(e.route)paintRoute(d,e.route);else if(!e.simulated&&e.callsign)d.querySelector('.rt').textContent='Route: looking up…';
+ d.innerHTML=`<div class="h"><span class="t">${LBL[e.type]}</span>${b}<time>${new Date(e.t).toLocaleTimeString()}</time></div><span class="al">${e.airline?esc(e.airline)+' · ':''}</span><b>${esc(e.callsign||e.icao24)}</b>${e.airport?' near '+esc(e.airport):''} · ${facts(e).map(x=>esc(x||'n/a')).join(' · ')}<div class="note rt"></div><div class="note">${esc(e.basis||'')}${e.inferred?' — not confirmed by airline data':''}</div>`;d.dataset.id=e.id;if(e.route)paintRoute(d,e.route);else if(!e.simulated&&e.callsign)d.querySelector('.rt').textContent='Route: looking up…';
  $('#feed').prepend(d);while($('#feed').children.length>150)$('#feed').lastChild.remove();
  tick.unshift(line(e));tick.length=Math.min(tick.length,6);$('#tk').textContent=tick.join('   ◆   ');
  if(Date.now()-e.t<20000)queueAnnounce(e)}
@@ -117,7 +118,7 @@ const pend=new Map();
 function queueAnnounce(e){if(e.type==='trajectory'||e.route||e.simulated||!e.callsign)return announce(e);pend.set(e.id,{e,t:setTimeout(()=>{pend.delete(e.id);announce(e)},3000)})} // replayed history is shown, never spoken
 function setConn(){const c=$('#conn'),t=$('#ct');let k='bad',m='offline';
  if(running){const ok=es&&es.readyState===1,p=snap&&snap.status;
-  if(!ok){k='warn';m='reconnecting…'}else if(!p||p.state==='starting'){k='warn';m='connecting to provider'}else if(p.state==='ok'){k='live';m='live'}else{k='warn';const phase=p.phase==='aircraft_states'?'aircraft states':p.phase;m=(p.state==='rate_limited'?'provider rate-limited':'provider error')+(phase?' ('+phase+')':'')+' — '+(p.msg||'')}}
+  if(!ok){k='warn';m='reconnecting…'}else if(!p||p.state==='starting'){k='warn';m='connecting to provider'}else if(p.state==='ok'){k='live';m='live'}else{k='warn';m=(p.state==='rate_limited'?'provider rate-limited':'provider error')+' — '+(p.msg||'')}}
  c.className='pill '+k;t.textContent=m}
 function onSnap(s){snap=s;lastSnapAt=Date.now();const st=s.stats;
  $('#s_over').textContent=st.overhead;$('#s_hr').textContent=st.hour;$('#s_dep').textContent=st.dep;$('#s_arr').textContent=st.arr;$('#s_trk').textContent=st.tracked;
@@ -128,7 +129,7 @@ let wl;async function lock(){try{if('wakeLock' in navigator&&!wl&&running){wl=aw
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)lock()});
 function connect(){clearTimeout(retryT);if(es)es.close();if(S.lat==null)return;running=true;snap=null;lock();
  es=new EventSource(`/api/stream?lat=${S.lat}&lon=${S.lon}&radius=${S.radius}&sim=${S.sim?1:0}`);
- es.addEventListener('snapshot',e=>{backoff=1000;onSnap(JSON.parse(e.data))});es.addEventListener('event',e=>onEvent(JSON.parse(e.data)));es.addEventListener('route',e=>{const j=JSON.parse(e.data),d=[...$('#feed').children].find(x=>x.dataset.id===j.id);if(d)paintRoute(d,j.route);const q=pend.get(j.id);if(q){clearTimeout(q.t);pend.delete(j.id);if(j.route)q.e.route=j.route;announce(q.e)}});
+ es.addEventListener('snapshot',e=>{backoff=1000;onSnap(JSON.parse(e.data))});es.addEventListener('event',e=>onEvent(JSON.parse(e.data)));es.addEventListener('route',e=>{const j=JSON.parse(e.data),d=[...$('#feed').children].find(x=>x.dataset.id===j.id);if(d){paintRoute(d,j.route);const al=d.querySelector('.al');if(al&&j.airline)al.textContent=j.airline+' · '}const q=pend.get(j.id);if(q){clearTimeout(q.t);pend.delete(j.id);if(j.route)q.e.route=j.route;if(j.airline)q.e.airline=j.airline;announce(q.e)}});
  es.onopen=setConn;es.onerror=()=>{setConn();if(es.readyState===2&&running){retryT=setTimeout(connect,backoff);backoff=Math.min(backoff*2,30000)}}}
 function stop(){running=false;if(es)es.close();if(wl){wl.release();wl=null}setConn()}
 function start(){speechSynthesis.getVoices();speechSynthesis.speak(new SpeechSynthesisUtterance('')); // unlock TTS on user gesture
