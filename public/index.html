@@ -156,15 +156,15 @@ const cv=$('#cv');function draw(){const ctx=cv.getContext('2d'),dpr=devicePixelR
   ctx.fillStyle=col;ctx.textAlign='left';if(m){ctx.shadowColor='#000';ctx.shadowBlur=4}ctx.fillText((a.call||a.id)+(ft(a.alt)!=null?' FL'+String(Math.round(ft(a.alt)/100)).padStart(3,'0'):''),x+9,y+3);ctx.shadowBlur=0;ctx.textAlign='center'})}
 addEventListener('resize',draw);
 // Google Maps view
+const GM_KEY='AIzaSyDN5IwAxT7s0zCdgjTCVx4SL2uu6Pn8jX8'; // Maps JavaScript API key, restrict it by HTTP referrer in Google Cloud
 let gmap;const gm={fit:false,ready:null,ov:null,on:false};
-function loadGM(){if(gm.ready)return gm.ready;const k=localStorage.fs_gmkey;
- return gm.ready=new Promise((res,rej)=>{window.__gmok=res;window.gm_authFailure=()=>{$('#geo').textContent='Google Maps rejected the API key (check key, billing, referrer restrictions).';localStorage.removeItem('fs_gmkey')};
+function loadGM(){if(gm.ready)return gm.ready;const k=GM_KEY;if(!k||k.startsWith('PASTE_'))return Promise.reject(new Error('Add your Google Maps API key to GM_KEY in the script.'));
+ return gm.ready=new Promise((res,rej)=>{window.__gmok=res;window.gm_authFailure=()=>{$('#geo').textContent='Google Maps rejected the API key (check key, billing, referrer restrictions).';gm.ready=null};
   const s=document.createElement('script');s.src='https://maps.googleapis.com/maps/api/js?key='+encodeURIComponent(k)+'&callback=__gmok';s.onerror=()=>{gm.ready=null;rej(new Error('Google Maps failed to load'))};document.head.appendChild(s)})}
 function mapProj(){return gm.on&&gm.ov?gm.ov.getProjection():null}
 function drawMap(){if(!gmap||!snap||gm.fit)return;gmap.fitBounds(new google.maps.Circle({center:{lat:snap.center[0],lng:snap.center[1]},radius:snap.r*1500}).getBounds());gm.fit=true}
 $('#vw').onclick=async()=>{const r=$('.radar'),on=!r.classList.contains('map');
- if(on){if(!localStorage.fs_gmkey){const k=prompt('Google Maps JavaScript API key');if(!k)return;localStorage.fs_gmkey=k.trim()}
-  try{await loadGM()}catch(e){$('#geo').textContent=e.message;return}
+ if(on){try{await loadGM()}catch(e){$('#geo').textContent=e.message;return}
   r.classList.add('map');gm.on=true;
   if(!gmap){gmap=new google.maps.Map($('#gm'),{center:{lat:S.lat||0,lng:S.lon||0},zoom:11,mapTypeId:'hybrid',disableDefaultUI:true,zoomControl:true,gestureHandling:'greedy'});
    gm.ov=new google.maps.OverlayView();gm.ov.onAdd=gm.ov.onRemove=()=>{};gm.ov.draw=()=>draw();gm.ov.setMap(gmap)} // radar redraws on every pan/zoom
