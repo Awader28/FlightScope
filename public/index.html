@@ -19,6 +19,7 @@ main{display:grid;grid-template-columns:1fr 410px;gap:10px;padding:10px;min-heig
 .st b{display:block;font-size:22px;color:var(--cy);text-shadow:0 0 10px #29e0ff66}.st small{color:var(--dim);font-size:10px;text-transform:uppercase}
 .radar{flex:1;position:relative;min-height:260px;padding:0;overflow:hidden}canvas{width:100%;height:100%;display:block}
 .banner{position:absolute;top:8px;left:8px;right:8px;display:none;padding:6px 10px;border-radius:6px;background:#2a0f3a;border:1px solid var(--mg);color:var(--mg)}
+#gm{position:absolute;inset:0;display:none;z-index:0}.radar.map #gm{display:block}.radar canvas{position:absolute;inset:0;z-index:1}.radar.map canvas{pointer-events:none}.banner{z-index:2}
 button,input,select{font:inherit;color:var(--tx);background:#0d1e2e;border:1px solid var(--ln);border-radius:5px;padding:5px 9px}
 button{cursor:pointer}button:hover{border-color:var(--cy)}button.on{border-color:var(--cy);color:var(--cy)}
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:5px 0}label{color:var(--dim)}input[type=number]{width:70px}
@@ -40,7 +41,7 @@ button{cursor:pointer}button:hover{border-color:var(--cy)}button.on{border-color
   <div class="st"><b id="s_dep">–</b><small>Departures*</small></div><div class="st"><b id="s_arr">–</b><small>Arrivals*</small></div>
   <div class="st"><b id="s_trk">–</b><small>Tracked</small></div><div class="st"><b id="s_age">–</b><small>Data age</small></div>
  </div>
- <div class="card radar"><canvas id="cv"></canvas><div class="banner" id="sim">SIMULATED DATA — aircraft and events below are synthetic, not real flights.</div></div>
+ <div class="card radar"><canvas id="cv"></canvas><div id="gm"></div><div class="banner" id="sim">SIMULATED DATA — aircraft and events below are synthetic, not real flights.</div></div>
  <div class="note">* Departures/arrivals are <b>inferred</b> from position, altitude, speed, ground flag and airport proximity. No airline-confirmed departure/arrival feed is connected. <span id="prov"></span></div>
 </div>
 <div class="col">
@@ -57,7 +58,7 @@ button{cursor:pointer}button:hover{border-color:var(--cy)}button.on{border-color
    <label title="Pause between queued announcements">Gap s</label><input id="cd" type="number" min="0" max="300"></div>
   <div class="row"><label>Voice</label><select id="vs" style="max-width:100%"></select></div>
   <div class="row"><label>Pitch (lower = deeper)</label><input id="pt" type="range" min="0.5" max="1.5" step="0.1"></div>
-  <div class="row"><button id="quiet">🌙 Quiet mode</button><button id="nt">🔔 Browser notifications</button><button id="test">Test voice</button></div>
+  <div class="row"><button id="vw">🗺 Map overlay</button><button id="quiet">🌙 Quiet mode</button><button id="nt">🔔 Browser notifications</button><button id="test">Test voice</button></div>
  </div>
  <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0">
   <div class="tabs"><button id="t1" class="on">Live feed</button><button id="t2">Notification centre <span class="n" id="nn" style="display:none">0</span></button></div>
@@ -124,10 +125,10 @@ function onSnap(s){snap=s;lastSnapAt=Date.now();const st=s.stats;
  $('#s_over').textContent=st.overhead;$('#s_hr').textContent=st.hour;$('#s_dep').textContent=st.dep;$('#s_arr').textContent=st.arr;$('#s_trk').textContent=st.tracked;
  $('#sim').style.display=s.sim?'block':'none';$('#mode').textContent=s.sim?'SIMULATED':'LIVE · '+(s.status.provider||'OpenSky');$('#mode').style.color=s.sim?'var(--mg)':'var(--cy)';
  $('#prov').textContent=`Poll every ${Math.round(s.pollMs/1000)}s`+(s.status.credits?` · API credits left: ${s.status.credits}`:'')+(s.status.state!=='ok'&&s.status.msg?' · '+s.status.msg:'');
- setConn();draw()}
+ setConn();draw();drawMap()}
 let wl;async function lock(){try{if('wakeLock' in navigator&&!wl&&running){wl=await navigator.wakeLock.request('screen');wl.onrelease=()=>wl=null}}catch{}} // keep phone screen on so voice keeps running
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)lock()});
-function connect(){clearTimeout(retryT);if(es)es.close();if(S.lat==null)return;running=true;snap=null;lock();
+function connect(){clearTimeout(retryT);if(es)es.close();if(S.lat==null)return;running=true;snap=null;gm.fit=false;lock();
  es=new EventSource(`/api/stream?lat=${S.lat}&lon=${S.lon}&radius=${S.radius}&sim=${S.sim?1:0}`);
  es.addEventListener('snapshot',e=>{backoff=1000;onSnap(JSON.parse(e.data))});es.addEventListener('event',e=>onEvent(JSON.parse(e.data)));es.addEventListener('route',e=>{const j=JSON.parse(e.data),d=[...$('#feed').children].find(x=>x.dataset.id===j.id);if(d){paintRoute(d,j.route);const al=d.querySelector('.al');if(al&&j.airline)al.textContent=j.airline+' · '}const q=pend.get(j.id);if(q){clearTimeout(q.t);pend.delete(j.id);if(j.route)q.e.route=j.route;if(j.airline)q.e.airline=j.airline;announce(q.e)}});
  es.onopen=setConn;es.onerror=()=>{setConn();if(es.readyState===2&&running){retryT=setTimeout(connect,backoff);backoff=Math.min(backoff*2,30000)}}}
@@ -139,20 +140,36 @@ function start(){speechSynthesis.getVoices();speechSynthesis.speak(new SpeechSyn
   er=>{$('#man').style.display='flex';$('#geo').textContent='Location not available ('+er.message+'). Enter coordinates manually.'},{timeout:15000,maximumAge:60000})}
 // radar
 const cv=$('#cv');function draw(){const ctx=cv.getContext('2d'),dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;if(cv.width!==Math.round(w*dpr)){cv.width=w*dpr;cv.height=h*dpr}
- ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);const cx=w/2,cy=h/2,r=snap?snap.r:S.radius,sc=(Math.min(w,h)/2-26)/(r*1.5);
+ ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);const r=snap?snap.r:S.radius,pj=mapProj(),m=!!pj,c0=snap?snap.center:[S.lat||0,S.lon||0];let cx=w/2,cy=h/2,sc=(Math.min(w,h)/2-26)/(r*1.5),MP=null;
+ if(m){MP=(la,lo)=>{const p=pj.fromLatLngToContainerPixel(new google.maps.LatLng(la,lo));return[p.x,p.y]};[cx,cy]=MP(c0[0],c0[1]);sc=Math.abs(MP(c0[0]+1/110.57,c0[1])[1]-cy)}
  ctx.lineWidth=1;ctx.font='10px monospace';ctx.textAlign='center';
- [[.33,0],[.66,0],[1,1],[1.5,2]].forEach(([f,k])=>{ctx.beginPath();ctx.arc(cx,cy,r*f*sc,0,7);ctx.strokeStyle=k===1?'#29e0ff88':'#14324a';ctx.setLineDash(k===2?[4,6]:[]);ctx.stroke();ctx.setLineDash([]);if(f<=1){ctx.fillStyle='#6b8aa0';ctx.fillText((r*f).toFixed(1)+' km',cx,cy-r*f*sc-3)}});
- ctx.strokeStyle='#14324a';ctx.beginPath();ctx.moveTo(cx,cy-r*1.5*sc);ctx.lineTo(cx,cy+r*1.5*sc);ctx.moveTo(cx-r*1.5*sc,cy);ctx.lineTo(cx+r*1.5*sc,cy);ctx.stroke();ctx.fillStyle='#29e0ff';ctx.fillText('N',cx,cy-r*1.5*sc-6);
+ [[.33,0],[.66,0],[1,1],[1.5,2]].forEach(([f,k])=>{ctx.beginPath();ctx.arc(cx,cy,r*f*sc,0,7);ctx.strokeStyle=k===1?'#29e0ffcc':m?'#9fe9ff88':'#14324a';ctx.setLineDash(k===2?[4,6]:[]);ctx.stroke();ctx.setLineDash([]);if(f<=1){ctx.fillStyle=m?'#fff':'#6b8aa0';ctx.fillText((r*f).toFixed(1)+' km',cx,cy-r*f*sc-3)}});
+ ctx.strokeStyle=m?'#9fe9ff55':'#14324a';ctx.beginPath();ctx.moveTo(cx,cy-r*1.5*sc);ctx.lineTo(cx,cy+r*1.5*sc);ctx.moveTo(cx-r*1.5*sc,cy);ctx.lineTo(cx+r*1.5*sc,cy);ctx.stroke();ctx.fillStyle='#29e0ff';ctx.fillText('N',cx,cy-r*1.5*sc-6);
  ctx.beginPath();ctx.arc(cx,cy,4,0,7);ctx.fillStyle='#3dff9a';ctx.shadowColor='#3dff9a';ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
  if(!snap){ctx.fillStyle='#6b8aa0';ctx.fillText('Waiting for data…',cx,cy+30);return}
- const P=(la,lo)=>[cx+(lo-snap.center[1])*111.32*Math.cos(snap.center[0]*Math.PI/180)*sc,cy-(la-snap.center[0])*110.57*sc];
+ const P=MP||((la,lo)=>[cx+(lo-snap.center[1])*111.32*Math.cos(snap.center[0]*Math.PI/180)*sc,cy-(la-snap.center[0])*110.57*sc]);
  snap.airports.forEach(a=>{const[x,y]=P(a.lat,a.lon);ctx.strokeStyle='#ffb020';ctx.strokeRect(x-4,y-4,8,8);ctx.fillStyle='#ffb020';ctx.fillText(a.icao,x,y-8)});
- snap.ac.forEach(a=>{const col=snap.sim?'#d46bff':a.gnd?'#6b8aa0':a.in?'#29e0ff':'#3b6f94';
-  ctx.beginPath();a.trail.forEach(([la,lo],i)=>{const[x,y]=P(la,lo);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.strokeStyle=col+'66';ctx.stroke();
+ snap.ac.forEach(a=>{const col=snap.sim?'#d46bff':a.gnd?(m?'#9fb4c4':'#6b8aa0'):a.in?'#29e0ff':(m?'#6fb3ff':'#3b6f94');
+  ctx.beginPath();a.trail.forEach(([la,lo],i)=>{const[x,y]=P(la,lo);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.strokeStyle=col+(m?'cc':'66');ctx.stroke();
   const[x,y]=P(a.lat,a.lon);ctx.save();ctx.translate(x,y);ctx.shadowColor=col;ctx.shadowBlur=a.in?16:6;ctx.fillStyle=col;ctx.beginPath();
   if(a.hdg==null)ctx.arc(0,0,4,0,7);else{ctx.rotate(a.hdg*Math.PI/180);ctx.moveTo(0,-7);ctx.lineTo(5,6);ctx.lineTo(0,3);ctx.lineTo(-5,6)}ctx.closePath();ctx.fill();ctx.restore();
-  ctx.fillStyle=col;ctx.textAlign='left';ctx.fillText((a.call||a.id)+(ft(a.alt)!=null?' FL'+String(Math.round(ft(a.alt)/100)).padStart(3,'0'):''),x+9,y+3);ctx.textAlign='center'})}
+  ctx.fillStyle=col;ctx.textAlign='left';if(m){ctx.shadowColor='#000';ctx.shadowBlur=4}ctx.fillText((a.call||a.id)+(ft(a.alt)!=null?' FL'+String(Math.round(ft(a.alt)/100)).padStart(3,'0'):''),x+9,y+3);ctx.shadowBlur=0;ctx.textAlign='center'})}
 addEventListener('resize',draw);
+// Google Maps view
+let gmap;const gm={fit:false,ready:null,ov:null,on:false};
+function loadGM(){if(gm.ready)return gm.ready;const k=localStorage.fs_gmkey;
+ return gm.ready=new Promise((res,rej)=>{window.__gmok=res;window.gm_authFailure=()=>{$('#geo').textContent='Google Maps rejected the API key (check key, billing, referrer restrictions).';localStorage.removeItem('fs_gmkey')};
+  const s=document.createElement('script');s.src='https://maps.googleapis.com/maps/api/js?key='+encodeURIComponent(k)+'&callback=__gmok';s.onerror=()=>{gm.ready=null;rej(new Error('Google Maps failed to load'))};document.head.appendChild(s)})}
+function mapProj(){return gm.on&&gm.ov?gm.ov.getProjection():null}
+function drawMap(){if(!gmap||!snap||gm.fit)return;gmap.fitBounds(new google.maps.Circle({center:{lat:snap.center[0],lng:snap.center[1]},radius:snap.r*1500}).getBounds());gm.fit=true}
+$('#vw').onclick=async()=>{const r=$('.radar'),on=!r.classList.contains('map');
+ if(on){if(!localStorage.fs_gmkey){const k=prompt('Google Maps JavaScript API key');if(!k)return;localStorage.fs_gmkey=k.trim()}
+  try{await loadGM()}catch(e){$('#geo').textContent=e.message;return}
+  r.classList.add('map');gm.on=true;
+  if(!gmap){gmap=new google.maps.Map($('#gm'),{center:{lat:S.lat||0,lng:S.lon||0},zoom:11,mapTypeId:'hybrid',disableDefaultUI:true,zoomControl:true,gestureHandling:'greedy'});
+   gm.ov=new google.maps.OverlayView();gm.ov.onAdd=gm.ov.onRemove=()=>{};gm.ov.draw=()=>draw();gm.ov.setMap(gmap)} // radar redraws on every pan/zoom
+  drawMap();draw()}else{r.classList.remove('map');gm.on=false;draw()}
+ $('#vw').classList.toggle('on',on)};
 // controls
 const tg=(id,k)=>{$(id).classList.toggle('on',!!S[k])};
 function sync(){tg('#tts','tts');tg('#quiet','quiet');tg('#nt','nt');tg('#sm','sim');$('#vol').value=S.vol;$('#pt').value=S.pitch;$('#cd').value=S.cd;$('#rad').value=S.radius}
